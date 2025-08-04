@@ -10,8 +10,6 @@ LOG_FILE="/var/log/usb_scan.log"
 CACHE_FILE="/var/cache/usb_scan_seen.txt"
 # Max wait time for auto-mount (seconds)
 MAX_WAIT=30
-# Polling interval (seconds)
-POLL_INTERVAL=10
 # Temporary mount point for servers without auto-mount (optional)
 TEMP_MOUNT="/mnt/usb_temp"
 
@@ -32,7 +30,7 @@ log() {
 # Parse arguments
 DEBUG=0
 NO_CACHE=0
-MANUAL_DEV=""
+DEV=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --debug)
@@ -44,98 +42,85 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         *)
-            MANUAL_DEV="$1"
+            DEV="$1"
             shift
             ;;
     esac
 done
 
-# Function to scan a device
-scan_device() {
-    local DEV="$1"
-    if [ ! -b "$DEV" ]; then
-        log "Erro: Dispositivo $DEV não existe ou não é um dispositivo de bloco."
-        return 1
-    fi
-
-    log "Detectado dispositivo USB: $DEV"
-
-    # Get device serial for caching (unique identifier)
-    SERIAL=$(lsblk -no SERIAL "$DEV" 2>/dev/null | grep -v '^$')
-    if [ -z "$SERIAL" ]; then
-        log "Aviso: Serial não encontrado para $DEV. Cache desativado para este dispositivo."
-        NO_CACHE=1
-    fi
-
-    # Check cache if not disabled
-    if [ "$NO_CACHE" = 0 ] && [ -n "$SERIAL" ]; then
-        if grep -q "^$SERIAL$" "$CACHE_FILE"; then
-            log "Dispositivo $DEV (serial: $SERIAL) já foi escaneado anteriormente. Ignorando scan."
-            return 0
-        fi
-    fi
-
-    # Wait for auto-mount and get mount point
-    MOUNT_POINT=""
-    for ((i=0; i<MAX_WAIT; i+=5)); do
-        MOUNT_POINT=$(lsblk -no MOUNTPOINT "$DEV" 2>/dev/null | grep -v '^$')
-        if [ -n "$MOUNT_POINT" ]; then
-            break
-        fi
-        sleep 5
-    done
-
-    if [ -n "$MOUNT_POINT" ]; then
-        log "Ponto de montagem encontrado: $MOUNT_POINT. Iniciando scan."
-        if "$AVSCANNER" "$MOUNT_POINT" $SCAN_OPTIONS >> "$LOG_FILE" 2>&1; then
-            if [ "$NO_CACHE" = 0 ] && [ -n "$SERIAL" ]; then
-                echo "$SERIAL" >> "$CACHE_FILE"
-                log "Scan concluído com sucesso. Adicionado $SERIAL ao cache."
-            else
-                log "Scan concluído com sucesso (sem cache)."
-            fi
-        else
-            log "Erro durante scan de $MOUNT_POINT (código $?). Não adicionado ao cache."
-        fi
-    else
-        log "Erro: Ponto de montagem não encontrado para $DEV após $MAX_WAIT segundos. Ignorando scan."
-        # Optional: Manual mount for servers (uncomment if needed)
-        # if [ ! -d "$TEMP_MOUNT" ]; then mkdir -p "$TEMP_MOUNT"; fi
-        # if mount "$DEV" "$TEMP_MOUNT" 2>> "$LOG_FILE"; then
-        #     MOUNT_POINT="$TEMP_MOUNT"
-        #     log "Montado manualmente $DEV em $MOUNT_POINT. Iniciando scan."
-        #     if "$AVSCANNER" "$MOUNT_POINT" $SCAN_OPTIONS >> "$LOG_FILE" 2>&1; then
-        #         if [ "$NO_CACHE" = 0 ] && [ -n "$SERIAL" ]; then
-        #             echo "$SERIAL" >> "$CACHE_FILE"
-        #             log "Scan concluído com sucesso. Adicionado $SERIAL ao cache."
-        #         else
-        #             log "Scan concluído com sucesso (sem cache)."
-        #         fi
-        #     else
-        #         log "Erro durante scan de $MOUNT_POINT (código $?). Não adicionado ao cache."
-        #     fi
-        #     umount "$TEMP_MOUNT" || log "Erro ao desmontar $TEMP_MOUNT."
-        # else
-        #     log "Erro: Não foi possível montar $DEV após $MAX_WAIT segundos. Ignorando scan."
-        # fi
-    fi
-}
-
-# If a manual device is provided, scan it and exit
-if [ -n "$MANUAL_DEV" ]; then
-    scan_device "$MANUAL_DEV"
-    exit $?
+# If no device provided, exit with error
+if [ -z "$DEV" ]; then
+    log "Error: No device provided (e.g., /dev/sda1). Usage: $0 [--debug] [--no-cache] /dev/sdX"
+    exit 1
 fi
 
-# Main loop for background monitoring
-log "Iniciando monitoramento de dispositivos USB (intervalo: ${POLL_INTERVAL}s)"
-while true; do
-    # List USB block devices (partitions, e.g., /dev/sda1)
-    mapfile -t devices < <(lsblk -dpno NAME,TRAN | grep ' usb$' | grep -E '[0-9]$' | cut -d' ' -f1)
-    
-    for dev in "${devices[@]}"; do
-        scan_device "$dev"
-    done
+# Check if device exists
+if [ ! -b "$DEV" ]; then
+    log "Error: Device $DEV does not exist or is not a block device."
+    exit 1
+fi
 
-    sleep "$POLL_INTERVAL"
+log "Detected USB partition: $DEV"
+
+# Get device serial for caching (unique identifier)
+SERIAL=$(lsblk -no SERIAL "$DEV" 2>/dev/null | grep -v '^$')
+
+if [ -z "$SERIAL" ]; then
+    log "Warning: No serial found for $DEV. Caching disabled for this device."
+    NO_CACHE=1
+fi
+
+# Check cache if not disabled
+if [ "$NO_CACHE" = 0 ] && [ -n "$SERIAL" ]; then
+    if grep -q "^$SERIAL$" "$CACHE_FILE"; then
+        log "Device $DEV (serial: $SERIAL) already scanned previously. Skipping scan."
+        exit 0
+    fi
+fi
+
+# Wait for auto-mount and get mount point
+MOUNT_POINT=""
+for ((i=0; i<MAX_WAIT; i+=5)); do
+    MOUNT_POINT=$(lsblk -no MOUNTPOINT "$DEV" 2>/dev/null | grep -v '^$')
+    if [ -n "$MOUNT_POINT" ]; then
+        break
+    fi
+    sleep 5
 done
+
+if [ -n "$MOUNT_POINT" ]; then
+    log "Mount point found: $MOUNT_POINT. Starting scan."
+    if "$AVSCANNER" "$MOUNT_POINT" $SCAN_OPTIONS >> "$LOG_FILE" 2>&1; then
+        # On success, add to cache if caching enabled
+        if [ "$NO_CACHE" = 0 ] && [ -n "$SERIAL" ]; then
+            echo "$SERIAL" >> "$CACHE_FILE"
+            log "Scan completed successfully. Added $SERIAL to cache."
+        else
+            log "Scan completed successfully (no cache used)."
+        fi
+    else
+        log "Error during scan of $MOUNT_POINT (code $?). Not caching."
+    fi
+else
+    # Optional: For server environments without auto-mount, attempt manual mount
+    # Uncomment the block below if needed for headless servers
+    # if [ ! -d "$TEMP_MOUNT" ]; then mkdir -p "$TEMP_MOUNT"; fi
+    # if mount "$DEV" "$TEMP_MOUNT" 2>> "$LOG_FILE"; then
+    #     MOUNT_POINT="$TEMP_MOUNT"
+    #     log "Manually mounted $DEV to $MOUNT_POINT. Starting scan."
+    #     if "$AVSCANNER" "$MOUNT_POINT" $SCAN_OPTIONS >> "$LOG_FILE" 2>&1; then
+    #         if [ "$NO_CACHE" = 0 ] && [ -n "$SERIAL" ]; then
+    #             echo "$SERIAL" >> "$CACHE_FILE"
+    #             log "Scan completed successfully. Added $SERIAL to cache."
+    #         else
+    #             log "Scan completed successfully (no cache used)."
+    #         fi
+    #     else
+    #         log "Error during scan of $MOUNT_POINT (code $?). Not caching."
+    #     fi
+    #     umount "$TEMP_MOUNT" || log "Error unmounting $TEMP_MOUNT."
+    # else
+    #     log "Error: Could not find or mount $DEV after $MAX_WAIT seconds. Skipping scan."
+    # fi
+    log "Error: No mount point found for $DEV after $MAX_WAIT seconds. Skipping scan."
+fi
