@@ -4,14 +4,67 @@
 # Author: Adapted from Windows PowerShell logic
 # Date: 2025-08-08
 
-# How install it?
-# sudo apt install jq udisks2
-# sudo mkdir -p /var/lib
-# sudo touch /var/lib/usb-monitor-cache.json
-# sudo touch /var/log/usb-monitor.log
-# sudo chmod 666 /var/log/usb-monitor.log
-# sudo cp UsbMonitorSophos.sh /usr/local/bin/
-# sudo chmod +x /usr/local/bin/UsbMonitorSophos.sh
+###
+#
+# This script monitors for USB devices being mounted and automatically scans them
+# using Sophos avscanner. It's designed to run as a systemd service.
+#
+# ---
+#
+# Prerequisites
+#
+# Before running this script, ensure you have the following packages installed:
+# - udisks2: For monitoring USB device events.
+# - jq: A command-line JSON processor, used for managing the scan cache.
+#
+# To install them on Ubuntu/Debian:
+# sudo apt update
+# sudo apt install udisks2 jq
+#
+# ---
+#
+# How to Run
+#
+# For manual testing with debug logging, run the script with the --debug flag:
+# sudo ./usb-monitor.sh --debug
+#
+# To test without using the scan cache:
+# sudo ./usb-monitor.sh --no-cache
+#
+# ---
+#
+# How to Configure as a Systemd Service
+#
+# 1. Save this script to a directory like `/usr/local/bin/usb-monitor.sh`
+#    and make it executable:
+#    sudo chmod +x /usr/local/bin/usb-monitor.sh
+#
+# 2. Create a systemd service file at `/etc/systemd/system/usb-monitor.service`
+#    with the following content:
+#
+#    [Unit]
+#    Description=USB Mount and Scan Service
+#    Wants=network-online.target
+#
+#    [Service]
+#    Type=simple
+#    ExecStart=/usr/local/bin/usb-monitor.sh
+#    Restart=always
+#    RestartSec=3
+#    User=root
+#
+#    [Install]
+#    WantedBy=multi-user.target
+#
+# 3. Enable and start the service:
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now usb-monitor.service
+#
+# 4. Check the service status and logs:
+#    sudo systemctl status usb-monitor.service
+#    journalctl -u usb-monitor.service -f
+#
+###
 
 # ----- CONFIGURATION VARIABLES -----
 LOG_FILE="/var/log/usb-monitor.log"
