@@ -4,6 +4,16 @@
 # Author: Adapted from Windows PowerShell logic
 # Date: 2025-08-08
 
+# How install it?
+# sudo apt install jq udisks2
+# sudo mkdir -p /var/lib
+# sudo touch /var/lib/usb-monitor-cache.json
+# sudo touch /var/log/usb-monitor.log
+# sudo chmod 666 /var/log/usb-monitor.log
+# sudo cp UsbMonitorSophos.sh /usr/local/bin/
+# sudo chmod +x /usr/local/bin/UsbMonitorSophos.sh
+
+# ----- CONFIGURATION VARIABLES -----
 LOG_FILE="/var/log/usb-monitor.log"
 CACHE_FILE="/var/lib/usb-monitor-cache.json"
 SOPHOS_SCANNER="/opt/sophos-spl/plugins/av/bin/avscanner"
@@ -13,7 +23,7 @@ CACHE_TTL=86400  # 24 hours
 DEBUG=false
 USE_CACHE=true
 
-# Parse arguments
+# Parse command line arguments
 for arg in "$@"; do
     case $arg in
         --debug) DEBUG=true ;;
@@ -21,6 +31,9 @@ for arg in "$@"; do
     esac
 done
 
+# ----- SCRIPT FUNCTIONS -----
+
+# Function to log messages
 log() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
     echo "$msg" >> "$LOG_FILE"
@@ -29,6 +42,7 @@ log() {
     fi
 }
 
+# Function to load the cache file
 load_cache() {
     if [[ -f "$CACHE_FILE" ]]; then
         CACHE_CONTENT=$(cat "$CACHE_FILE")
@@ -37,10 +51,12 @@ load_cache() {
     fi
 }
 
+# Function to save the cache file
 save_cache() {
     echo "$CACHE_CONTENT" > "$CACHE_FILE"
 }
 
+# Function to check if a device is in the cache
 is_in_cache() {
     local serial="$1"
     if ! $USE_CACHE; then
@@ -57,6 +73,7 @@ is_in_cache() {
     return 1
 }
 
+# Function to add a device to the cache
 add_to_cache() {
     local serial="$1"
     local now=$(date +%s)
@@ -65,6 +82,7 @@ add_to_cache() {
     save_cache
 }
 
+# Function to scan the USB device
 scan_usb() {
     local mount_point="$1"
     if [[ ! -x "$SOPHOS_SCANNER" ]]; then
@@ -83,24 +101,46 @@ scan_usb() {
     fi
 }
 
+
+# ----- MAIN SCRIPT LOGIC -----
+
 log "Service started."
 load_cache
 
-# Ensure jq and udisks2 are installed
+# Ensure required dependencies are installed
 if ! command -v jq &>/dev/null || ! command -v udisksctl &>/dev/null; then
     log "ERROR: jq and udisks2 are required. Install with: sudo apt install jq udisks2"
     exit 1
 fi
 
-# Monitor only "mounted" events
-udisksctl monitor | while read -r line; do
-    if echo "$line" | grep -q "Mounted"; then
-        dev=$(echo "$line" | awk '{print $2}' | tr -d ':')
-        mount_point=$(lsblk -no MOUNTPOINT "$dev" | grep -v '^$' | head -n 1)
-        if [[ -n "$mount_point" ]]; then
-            serial=$(udevadm info --query=all --name="$dev" | grep "ID_SERIAL=" | cut -d= -f2)
-            [[ -z "$serial" ]] && serial="$dev"
+log "DEBUG: Starting udisksctl monitor loop..."
 
+device_path=""
+
+# Monitor udisksd events
+udisksctl monitor | while read -r line; do
+    log "DEBUG: Received line from udisksctl: '$line'"
+
+    # 1. Detect a block device event line, which contains the D-Bus path
+    if [[ "$line" =~ "/org/freedesktop/UDisks2/block_devices/" ]]; then
+        device_path=$(echo "$line" | grep -o '/org/freedesktop/UDisks2/block_devices/s[a-z][a-z0-9]*')
+        log "DEBUG: Detected new block device event: $device_path"
+        continue
+    fi
+    
+    # 2. If a device path was found, check for the MountPoints line
+    if [[ -n "$device_path" ]] && echo "$line" | grep -q "MountPoints:"; then
+        mount_point=$(echo "$line" | awk -F': ' '{print $2}' | sed 's/^ *//;s/ *$//')
+        
+        # Ensure a valid mount point was found
+        if [[ -n "$mount_point" ]]; then
+            log "DEBUG: Mount point found: $mount_point"
+            
+            dev_name=$(basename "$device_path")
+            serial=$(udevadm info --query=all --name="$dev_name" | grep "ID_SERIAL=" | cut -d= -f2)
+            [[ -z "$serial" ]] && serial="$dev_name"
+            log "DEBUG: Identified device name: $dev_name, serial: $serial"
+            
             if is_in_cache "$serial"; then
                 log "Bypassing scan for $serial (recently scanned)"
             else
@@ -109,8 +149,11 @@ udisksctl monitor | while read -r line; do
                 fi
             fi
         else
-            log "WARNING: Device $dev mounted but no mount point found"
+            log "WARNING: Device $device_path has no valid mount point"
         fi
+        
+        # Reset the device path for the next event
+        device_path=""
     fi
 done
 
