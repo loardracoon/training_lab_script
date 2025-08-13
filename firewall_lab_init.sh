@@ -28,17 +28,16 @@ confirm() {
 
 # ========== Step 1: Download firewall image ==========
 download_firewall_image() {
-  confirm "Do you want to download the firewall image?" || return
+  read -p "Do you want to download the firewall image? (y/N): " opt
+  [[ "$opt" =~ ^[Yy]$ ]] || return
+
   read -p "Enter the URL of the image (.zip): " image_url
   [[ "$image_url" =~ \.zip$ ]] || error "URL must end with .zip"
 
   log "Starting parallel download of image on all nodes..."
-
   for node in "${NODES[@]}"; do
     ssh root@"$node" bash -s <<EOF &
       set -euo pipefail
-
-      # Verificar se unzip está instalado
       if ! command -v unzip >/dev/null 2>&1; then
         echo "Installing unzip..."
         if command -v apt-get >/dev/null 2>&1; then
@@ -52,40 +51,34 @@ download_firewall_image() {
           exit 1
         fi
       fi
-
       mkdir -p /images/firewall && cd /images/firewall
       rm -f firewall.zip
-
       echo "Downloading image..."
       if ! wget -q --show-progress -O firewall.zip "$image_url"; then
         echo "Error downloading file." >&2
         exit 1
       fi
-
-      # Verificar se o arquivo foi baixado e tem tamanho maior que 0
       if [[ ! -s firewall.zip ]]; then
         echo "Error: Downloaded file is empty or missing." >&2
         exit 1
       fi
-
       echo "Extracting..."
       if ! unzip -o firewall.zip -d /images/firewall; then
         echo "Error extracting the zip file." >&2
         exit 1
       fi
-
       rm -f firewall.zip
 EOF
   done
-
   wait
   log "Download and extraction completed on all nodes."
 }
 
-
 # ========== Step 2: SDN Setup ==========
 setup_sdn() {
-  confirm "Do you want to configure the SDN?" || return
+  read -p "Do you want to configure the SDN? (y/N): " opt
+  [[ "$opt" =~ ^[Yy]$ ]] || return
+
   local bridge
   bridge=$(bridge link | awk '/master/{print $2}' | sort -u | head -n1)
   [[ -z "$bridge" ]] && error "Default bridge not detected."
@@ -99,20 +92,19 @@ setup_sdn() {
       --alias student$(printf "%02d" "$i") \
       --zone Private --tag $((1000+i)) --vlanaware 1
   done
-
   for i in 1 2; do
     pvesh create /cluster/sdn/vnets \
       --vnet WAN0$i --alias wan0$i \
       --zone Private --tag $((2000+i)) --vlanaware 1
   done
-
   pvesh set /cluster/sdn
   log "SDN successfully configured."
 }
 
 # ========== Step 3: Create base templates ==========
 create_base_templates() {
-  confirm "Do you want to create base templates?" || return
+  read -p "Do you want to create base templates? (y/N): " opt
+  [[ "$opt" =~ ^[Yy]$ ]] || return
 
   log "Creating base VMs in parallel..."
   for idx in "${!NODES[@]}"; do
@@ -138,21 +130,22 @@ EOF
   wait
   log "Base VMs created."
 
-  confirm "Do you want to convert the base VMs into templates?" || return
-
-  for node in "${NODES[@]}"; do
-    ssh root@"$node" bash -s <<EOF
-      set -e
-      vmid=\$(qm list | awk '/STDNTFWBASE/ {print \$1}')
-      [[ -n "\$vmid" ]] && qm template "\$vmid"
+  if confirm "Do you want to convert the base VMs into templates?"; then
+    for node in "${NODES[@]}"; do
+      ssh root@"$node" bash -s <<EOF
+        set -e
+        vmid=\$(qm list | awk '/STDNTFWBASE/ {print \$1}')
+        [[ -n "\$vmid" ]] && qm template "\$vmid"
 EOF
-    log "$node: Template created."
-  done
+      log "$node: Template created."
+    done
+  fi
 }
 
 # ========== Step 4: Create student VMs ==========
 create_students() {
-  confirm "Do you want to create student VMs?" || return
+  read -p "Do you want to create student VMs? (y/N): " opt
+  [[ "$opt" =~ ^[Yy]$ ]] || return
 
   read -p "How many students? [$STDNT_MIN-$STDNT_MAX, default=15]: " count
   count=${count:-15}
@@ -185,9 +178,10 @@ EOF
 
 # ========== Step 5: Snapshots ==========
 create_snapshots() {
-  confirm "Do you want to take snapshots of the student VMs?" || return
-  log "Creating snapshots ($SNAPSHOT_NAME)..."
+  read -p "Do you want to take snapshots of the student VMs? (y/N): " opt
+  [[ "$opt" =~ ^[Yy]$ ]] || return
 
+  log "Creating snapshots ($SNAPSHOT_NAME)..."
   for node in "${NODES[@]}"; do
     ssh root@"$node" bash -s <<EOF &
       set -e
