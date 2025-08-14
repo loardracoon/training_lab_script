@@ -8,6 +8,20 @@ SNAPSHOT_NAME="base-clean"
 STDNT_MIN=3
 STDNT_MAX=21
 
+# ===== Novo filtro opcional =====
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    minipc1|minipc2|minipc3)
+      NODES=("$1")
+      TEMPLATE_IDS=("${TEMPLATE_IDS[$(( $(echo "${!NODES[@]}" | grep -o $1 | wc -w) ))]}")
+      ;;
+    *)
+      echo "[ERROR] Invalid node name. Use: minipc1, minipc2 or minipc3."
+      exit 1
+      ;;
+  esac
+fi
+
 # ========== Utils ==========
 log()   { echo -e "[INFO] $*"; }
 error() { echo -e "[ERROR] $*" >&2; exit 1; }
