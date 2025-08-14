@@ -8,12 +8,25 @@ SNAPSHOT_NAME="base-clean"
 STDNT_MIN=3
 STDNT_MAX=21
 
-# ===== Novo filtro opcional =====
+# ===== Filtro opcional por nó (preserva posição no round-robin global) =====
+ALL_NODES=( "minipc1" "minipc2" "minipc3" )
+ALL_TEMPLATE_IDS=( 9001 9002 9003 )
+SINGLE_NODE_MODE=0
+NODE_INDEX=0
+
 if [[ $# -gt 0 ]]; then
   case "$1" in
     minipc1|minipc2|minipc3)
+      # Descobre o índice do nó dentro do conjunto global
+      for i in "${!ALL_NODES[@]}"; do
+        if [[ "${ALL_NODES[$i]}" == "$1" ]]; then
+          NODE_INDEX=$i
+          break
+        fi
+      done
+      # Mantém NODES com apenas o alvo, mas guardamos índice global para os passos
       NODES=("$1")
-      TEMPLATE_IDS=("${TEMPLATE_IDS[$(( $(echo "${!NODES[@]}" | grep -o $1 | wc -w) ))]}")
+      SINGLE_NODE_MODE=1
       ;;
     *)
       echo "[ERROR] Invalid node name. Use: minipc1, minipc2 or minipc3."
@@ -21,6 +34,7 @@ if [[ $# -gt 0 ]]; then
       ;;
   esac
 fi
+
 
 # ========== Utils ==========
 log()   { echo -e "[INFO] $*"; }
@@ -175,25 +189,53 @@ create_students() {
   fi
 
   log "Creating $count VMs in round-robin..."
-  for ((i=0; i<count; i++)); do
-    local ni=$((i % ${#NODES[@]}))
-    local node=${NODES[ni]}
-    local tpl=${TEMPLATE_IDS[ni]}
-    local vmid=$((1001 + i))
-    local name=$(printf "STDNTFW%02d" $((i+1)))
-    local net=$(printf "STDNT%02d" $((i+1)))
 
-    ssh root@"$node" bash -s <<EOF &
-      set -e
-      qm clone "$tpl" "$vmid" --name "$name"
-      qm set "$vmid" \
-        --net0 virtio,bridge="$net",firewall=0 \
-        --net1 virtio,bridge=WAN01,firewall=0 \
-        --net2 virtio,bridge=WAN02,firewall=0 \
-        --boot order=scsi0
+  if (( SINGLE_NODE_MODE == 1 )); then
+    # Cria somente as VMs que pertenceriam a este nó no round-robin global:
+    # Índices 1..count mapeados: 1->minipc1, 2->minipc2, 3->minipc3, 4->minipc1, ...
+    # Portanto, para minipc2 (NODE_INDEX=1), criamos 2,5,8,... (i = NODE_INDEX, passo 3)
+    target_node="${ALL_NODES[$NODE_INDEX]}"
+    tpl="${ALL_TEMPLATE_IDS[$NODE_INDEX]}"
+
+    for ((i=NODE_INDEX; i<count; i+=3)); do
+      vmid=$((1000 + i + 1))
+      name=$(printf "STDNTFW%02d" $((i+1)))
+      net=$(printf "STDNT%02d" $((i+1)))
+
+      ssh root@"$target_node" bash -s <<EOF &
+set -e
+qm clone "$tpl" "$vmid" --name "$name"
+qm set "$vmid" \
+  --net0 virtio,bridge="$net",firewall=0 \
+  --net1 virtio,bridge=WAN01,firewall=0 \
+  --net2 virtio,bridge=WAN02,firewall=0 \
+  --boot order=scsi0
 EOF
-  done
-  wait
+    done
+    wait
+  else
+    # Comportamento original (todos os nós)
+    for ((i=0; i<count; i++)); do
+      local ni=$((i % ${#NODES[@]}))
+      local node=${NODES[ni]}
+      local tpl=${TEMPLATE_IDS[ni]}
+      local vmid=$((1001 + i))
+      local name=$(printf "STDNTFW%02d" $((i+1)))
+      local net=$(printf "STDNT%02d" $((i+1)))
+
+      ssh root@"$node" bash -s <<EOF &
+set -e
+qm clone "$tpl" "$vmid" --name "$name"
+qm set "$vmid" \
+  --net0 virtio,bridge="$net",firewall=0 \
+  --net1 virtio,bridge=WAN01,firewall=0 \
+  --net2 virtio,bridge=WAN02,firewall=0 \
+  --boot order=scsi0
+EOF
+    done
+    wait
+  fi
+
   log "All student VMs have been created."
 }
 
