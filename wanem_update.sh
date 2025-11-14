@@ -1,137 +1,89 @@
-#!/usr/bin/env bash
+#Requires -Version 5.1
 
-set -Eeuo pipefail
+$ErrorActionPreference = 'Stop'
 
+# === Default Parameters (edit according to your environment) ===
 
+$HostUrl = "https://10.100.100.1"
 
-# === Parmetros padro (edite conforme o seu ambiente) ===
+$ApiKey = if ($env:VYOS_API_KEY) { $env:VYOS_API_KEY } else { "MY-HTTPS-API-PLAINTEXT-KEY" }  # Set env:VYOS_API_KEY=... if preferred
 
-HOST="https://10.100.100.1"
+$Insecure = $true  # $true = skip cert check (self-signed); $false = require valid TLS
 
-API_KEY="${VYOS_API_KEY:-MY-HTTPS-API-PLAINTEXT-KEY}"   # export VYOS_API_KEY=... se preferir
+$Link = ""
 
-INSECURE=1   # 1 = usa -k (cert self-signed); 0 = exige TLS vlido
+$Profile = ""
 
+$DoSave = $false
 
-
-LINK=""
-
-PROFILE=""
-
-DO_SAVE=0
-
-
-
-usage() {
-
-  cat >&2 <<USAGE
-
-Uso: $0 --link <ethX> --profile <POLICY> [--save] [--host https://IP] [--key <APIKEY>] [--no-insecure]
-
-Ex.: $0 --link eth1 --profile HIGHDELAY --save
-
-USAGE
-
-  exit 2
-
+function Usage {
+    Write-Error @"
+Usage: $PSCommandPath -Link <ethX> -Profile <POLICY> [-Save] [-HostUrl https://IP] [-ApiKey <APIKEY>] [-NoInsecure]
+Ex.: $PSCommandPath -Link eth1 -Profile HIGHDELAY -Save
+"@
+    exit 2
 }
 
+# Basic parsing using parameters
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$Link,
 
+    [Parameter(Mandatory=$true)]
+    [string]$Profile,
 
-# Parse bsico
+    [switch]$Save,
 
-while [[ $# -gt 0 ]]; do
+    [string]$HostUrl = "https://10.100.100.1",
 
-  case "$1" in
+    [string]$ApiKey = $(if ($env:VYOS_API_KEY) { $env:VYOS_API_KEY } else { "MY-HTTPS-API-PLAINTEXT-KEY" }),
 
-    --link)     LINK="${2:-}"; shift 2 ;;
-
-    --profile)  PROFILE="${2:-}"; shift 2 ;;
-
-    --save)     DO_SAVE=1; shift ;;
-
-    --host)     HOST="${2:-}"; shift 2 ;;
-
-    --key)      API_KEY="${2:-}"; shift 2 ;;
-
-    --no-insecure) INSECURE=0; shift ;;
-
-    *) echo "Arg invlido: $1" >&2; usage ;;
-
-  esac
-
-done
-
-[[ -n "$LINK" && -n "$PROFILE" ]] || usage
-
-
-
-# Validaes mnimas (reduz risco de injeo)
-
-[[ "$LINK" =~ ^[A-Za-z0-9./_-]+$ ]]   || { echo "ERRO: --link invlido"; exit 2; }
-
-[[ "$PROFILE" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "ERRO: --profile invlido"; exit 2; }
-
-
-
-CURL_OPTS=(-sS --location)
-
-[[ $INSECURE -eq 1 ]] && CURL_OPTS+=(-k)
-
-
-
-# Monta payload como LISTA de operaes (delete + set em um nico commit)
-
-PAYLOAD=$(cat <<JSON
-
-[
-
-  {"op":"delete","path":["qos","interface","$LINK","egress"]},
-
-  {"op":"set","path":["qos","interface","$LINK","egress"],"value":"$PROFILE"}
-
-]
-
-JSON
-
+    [switch]$NoInsecure
 )
 
+$DoSave = $Save.IsPresent
+$Insecure = -not $NoInsecure.IsPresent
 
+# Minimal validations (reduce injection risk)
+if ($Link -notmatch '^[A-Za-z0-9./_-]+$') {
+    Write-Error "ERROR: -Link invalid"
+    exit 2
+}
+if ($Profile -notmatch '^[A-Za-z0-9._-]+$') {
+    Write-Error "ERROR: -Profile invalid"
+    exit 2
+}
 
-# === 1) /configure: aplica mudanas (commit implcito) ===
+$CertCheck = if ($Insecure) { @{ SkipCertificateCheck = $true } } else { @{} }  # SkipCertificateCheck requires PS 7+; for older, may need workaround
 
-resp=$(curl "${CURL_OPTS[@]}" --request POST "$HOST/configure" --form "data=$PAYLOAD" --form "key=$API_KEY")
+# Build payload as LIST of operations (delete + set in one commit)
+$Payload = @(
+    @{op="delete"; path=@("qos","interface",$Link,"egress")},
+    @{op="set"; path=@("qos","interface",$Link,"egress"); value=$Profile}
+) | ConvertTo-Json -Compress
 
-ok=$(printf '%s' "$resp" | grep -o '"success": *true' || true)
+# === 1) /configure: apply changes (implicit commit) ===
+$Uri = "$HostUrl/configure"
+$Body = @{ data = $Payload; key = $ApiKey }
+$Resp = Invoke-WebRequest -Uri $Uri -Method Post -Body $Body -ContentType 'multipart/form-data' @CertCheck
 
-if [[ -z "$ok" ]]; then
-
-  echo "Falha no /configure. Resposta: $resp" >&2
-
-  exit 1
-
-fi
-
-
-
-# === 2) /config-file: salva (opcional) ===
-
-if [[ $DO_SAVE -eq 1 ]]; then
-
-  resp2=$(curl "${CURL_OPTS[@]}" --request POST "$HOST/config-file" --form 'data={"op":"save"}' --form "key=$API_KEY")
-
-  ok2=$(printf '%s' "$resp2" | grep -o '"success": *true' || true)
-
-  if [[ -z "$ok2" ]]; then
-
-    echo "Commit OK, mas save falhou. Resposta: $resp2" >&2
-
+$Ok = if ($Resp.Content -match '"success":\s*true') { $true } else { $false }
+if (-not $Ok) {
+    Write-Error "Failure in /configure. Response: $($Resp.Content)"
     exit 1
+}
 
-  fi
+# === 2) /config-file: save (optional) ===
+if ($DoSave) {
+    $UriSave = "$HostUrl/config-file"
+    $BodySave = @{ data = '{"op":"save"}'; key = $ApiKey }
+    $RespSave = Invoke-WebRequest -Uri $UriSave -Method Post -Body $BodySave -ContentType 'multipart/form-data' @CertCheck
 
-fi
+    $OkSave = if ($RespSave.Content -match '"success":\s*true') { $true } else { $false }
+    if (-not $OkSave) {
+        Write-Error "Commit OK, but save failed. Response: $($RespSave.Content)"
+        exit 1
+    }
+}
 
-
-
-echo "OK: QoS em $LINK => egress '$PROFILE' aplicado$( [[ $DO_SAVE -eq 1 ]] && echo ' e salvo' )."
+Write-Output "OK: QoS on $Link => egress '$Profile' applied$(if ($DoSave) { ' and saved' })."
